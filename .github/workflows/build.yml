@@ -76,10 +76,15 @@ jobs:
                      lambda m: m.group(1) + '"' + os.environ["APP_ID"] + '"', s)
           s = re.sub(r'(versionCode\s*=?\s*)\d+', lambda m: m.group(1) + os.environ["VERSION_CODE"], s, count=1)
           # the AAB is signed after the build, so drop upstream's signing hooks
-          s = re.sub(r'^[ \t]*signingConfig(?!s)\b.*\n', '', s, flags=re.M)
-          s = re.sub(r'signingConfig\s*=?\s*signingConfigs\.\w+', '', s)
+          # drop whole lines that assign a signing config (e.g. productFlavors["x"].signingConfig = ...);
+          # \bsigningConfig\s*= does not match the signingConfigs { } block itself
+          s = re.sub(r'^[^\n]*\bsigningConfig\s*=[^\n]*\n', '', s, flags=re.M)
+          s = re.sub(r'^[^\n]*\bsigningConfig\s*\([^\n]*\n', '', s, flags=re.M)
           g.write_text(s, encoding="utf-8")
           print("patched", g)
+          for i, l in enumerate(s.splitlines(), 1):
+              if "signingConfig" in l:
+                  print("remaining:", i, l)
           PY
 
       - uses: gradle/actions/setup-gradle@v5
