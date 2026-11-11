@@ -1,3 +1,8 @@
-ics-openvpn/
-dist/
 *.jks
+*.keystore
+local.properties
+.gradle/
+build/
+.idea/
+third_party/
+ics-openvpn/
