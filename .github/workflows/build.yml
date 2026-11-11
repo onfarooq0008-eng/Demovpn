@@ -1,0 +1,136 @@
+name: Build Android
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      APP_ID: com.cw1huuxd.uj4j9pgl
+      ICS_REF: master                      # pin a release tag here once you have a green build
+      VERSION_CODE: ${{ github.run_number }}
+      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install SWIG and accept SDK licenses
+        run: |
+          sudo apt-get update && sudo apt-get install -y swig
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
+      - name: Get the OpenVPN engine (ics-openvpn) and add our app code
+        run: |
+          export GIT_CONFIG_COUNT=2
+          export GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com:
+          export GIT_CONFIG_KEY_1=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_1=ssh://git@github.com/
+          git clone --depth 1 --branch "$ICS_REF" --recurse-submodules --shallow-submodules \
+            https://github.com/schwabe/ics-openvpn.git ics-openvpn
+          cp -r app/src/main/java/. ics-openvpn/main/src/main/java/
+
+      - name: Make our screen the launcher, set package name and version
+        run: |
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          main = Path("ics-openvpn/main")
+
+          mf = main / "src/main/AndroidManifest.xml"
+          t = mf.read_text(encoding="utf-8")
+          t = re.sub(r'[ \t]*<category\s+android:name="android\.intent\.category\.LAUNCHER"\s*/>[ \t]*\n?', '', t)
+          block = '''
+              <activity android:name="com.example.ovpnclient.ServerListActivity"
+                  android:exported="true" android:label="OVPN Client"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <intent-filter>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent-filter>
+              </activity>
+              <service android:name="com.example.ovpnclient.RefreshJob"
+                  android:permission="android.permission.BIND_JOB_SERVICE" android:exported="false" />
+          '''
+          assert "</application>" in t, "no </application> in manifest"
+          t = t.replace("</application>", block + "</application>", 1)
+          for perm in ("android.permission.RECEIVE_BOOT_COMPLETED", "android.permission.INTERNET"):
+              if perm not in t:
+                  t = t.replace("<application", '<uses-permission android:name="%s" />\n<application' % perm, 1)
+          mf.write_text(t, encoding="utf-8")
+
+          g = main / "build.gradle"
+          if not g.exists():
+              g = main / "build.gradle.kts"
+          s = g.read_text(encoding="utf-8")
+          s = re.sub(r'(applicationId\s*=?\s*)["\']de\.blinkt\.openvpn["\']',
+                     lambda m: m.group(1) + '"' + os.environ["APP_ID"] + '"', s)
+          s = re.sub(r'(versionCode\s*=?\s*)\d+', lambda m: m.group(1) + os.environ["VERSION_CODE"], s, count=1)
+          # the AAB is signed after the build, so drop upstream's signing hooks
+          # drop whole lines that assign a signing config (e.g. productFlavors["x"].signingConfig = ...);
+          # \bsigningConfig\s*= does not match the signingConfigs { } block itself
+          s = re.sub(r'^[^\n]*\bsigningConfig\s*=[^\n]*\n', '', s, flags=re.M)
+          s = re.sub(r'^[^\n]*\bsigningConfig\s*\([^\n]*\n', '', s, flags=re.M)
+          g.write_text(s, encoding="utf-8")
+          print("patched", g)
+          for i, l in enumerate(s.splitlines(), 1):
+              if "signingConfig" in l:
+                  print("remaining:", i, l)
+          PY
+
+      - uses: gradle/actions/setup-gradle@v5
+        with:
+          # ics-openvpn is cloned from upstream above, and its wrapper jar is not in
+          # Gradle's public checksum list, so validation fails. The source is trusted.
+          validate-wrappers: false
+
+      - name: Build debug APK and release AAB
+        working-directory: ics-openvpn
+        run: |
+          chmod +x gradlew
+          TASKS=$(./gradlew -q :main:tasks --all | awk '{print $1}')
+          pick() { echo "$TASKS" | grep -E "$1" | grep -i ovpn23 | grep -vi skeleton | head -1; }
+          DEBUG=$(pick '^assemble.*Debug$'); BUNDLE=$(pick '^bundle.*Release$')
+          echo "Tasks: $DEBUG / $BUNDLE"
+          if [ -z "$DEBUG" ] || [ -z "$BUNDLE" ]; then
+            echo "Could not find build tasks. Available:"; echo "$TASKS" | grep -E '^(assemble|bundle)'; exit 1
+          fi
+          ./gradlew --no-daemon ":main:$DEBUG" ":main:$BUNDLE"
+
+      - name: Collect debug APK
+        run: |
+          mkdir -p dist
+          APK=$(find ics-openvpn/main/build/outputs/apk -name '*.apk' -path '*ebug*' | head -1)
+          cp "$APK" dist/app-debug.apk
+
+      - name: Sign AAB
+        if: env.KEYSTORE_BASE64 != ''
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          AAB=$(find ics-openvpn/main/build/outputs/bundle -name '*.aab' | head -1)
+          cp "$AAB" dist/app-release.aab
+          jarsigner -sigalg SHA256withRSA -digestalg SHA-256 \
+            -keystore "$RUNNER_TEMP/release.jks" -storepass "$KEYSTORE_PASSWORD" \
+            -keypass "$KEY_PASSWORD" dist/app-release.aab "$KEY_ALIAS"
+          jarsigner -verify dist/app-release.aab | head -2
+
+      - name: Keep unsigned AAB (no keystore secrets set)
+        if: env.KEYSTORE_BASE64 == ''
+        run: |
+          AAB=$(find ics-openvpn/main/build/outputs/bundle -name '*.aab' | head -1)
+          cp "$AAB" dist/app-release-UNSIGNED.aab
+          echo "::warning::KEYSTORE_BASE64 not set, AAB is not signed"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-builds
+          path: dist/
