@@ -1,40 +1,122 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- OpenVPN engine runs as a foreground service; Android 14+ needs the type + permission (VPN apps use systemExempted). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" />
+    <!-- Android 13+ only hands the advertising ID to apps that declare this. Without it the ad SDKs get a
+         zeroed ID (worse ad fill and measurement). Also what the Play Console "Advertising ID" declaration refers to. -->
+    <uses-permission android:name="com.google.android.gms.permission.AD_ID" />
+    <!-- This app never asks for location or file storage access; it has no
+         feature that needs either. These explicit removals are a safety net,
+         not a fix for a known problem: they guarantee the Play Console
+         permissions declaration stays clean even if a future update to any
+         dependency ever merges one of these into the manifest transitively,
+         without needing to notice and catch it by hand. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" tools:node="remove" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" tools:node="remove" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" tools:node="remove" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" tools:node="remove" />
 
+    <!-- Lets the app see other installed launchable apps for Split Tunneling, WITHOUT
+         needing the heavily-scrutinized QUERY_ALL_PACKAGES permission (which Play Store
+         requires a special justification form for). This narrower <queries> declaration
+         is the modern, Play-Store-friendly approach and needs no extra justification. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
+    <!-- tools:replace on networkSecurityConfig is a safeguard: if any library ever ships its own network security config,
+         the app's HTTPS-only config (res/xml/network_security_config.xml) wins instead of failing the manifest merge. -->
     <application
+        android:hardwareAccelerated="true"
         android:name=".FastVpnApp"
         android:allowBackup="false"
-        android:usesCleartextTraffic="false"
+        android:enableOnBackInvokedCallback="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
-        android:theme="@style/Theme.FastVPN">
+        android:roundIcon="@mipmap/ic_launcher"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.FastVPN"
+        android:networkSecurityConfig="@xml/network_security_config"
+        tools:replace="android:networkSecurityConfig"
+        tools:targetApi="36">
+
+
+        <!-- Ads. The Yandex SDK would otherwise start by itself at launch; we start it ourselves (AdsManager.init)
+             only after the user has tapped "Allow" on the ad dialog, so no ad SDK runs before consent. -->
+        <meta-data
+            android:name="com.yandex.mobile.ads.AUTOMATIC_SDK_INITIALIZATION"
+            android:value="false" />
+
         <activity
-            android:name=".MainActivity"
+            android:name=".ui.SplashActivity"
             android:exported="true"
-            android:launchMode="singleTop"
-            android:windowSoftInputMode="adjustResize">
+            android:theme="@style/Theme.FastVPN.Splash">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
 
+        <activity android:name=".ui.MainActivity" android:exported="false" />
+        <activity android:name=".ui.ConsentActivity" android:exported="false" />
+        <activity android:name=".ui.SettingsActivity" android:exported="false" />
+        <activity android:name=".ui.SplitTunnelActivity" android:exported="false" />
+
+        <!-- Handles the Disconnect button on the persistent "connected" notification. -->
+        <receiver android:name=".vpn.VpnActionReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="com.fastvpnn.app.ACTION_DISCONNECT" />
+            </intent-filter>
+        </receiver>
+
+        <!-- REQUIRED by the WireGuard "tunnel" library itself: GoBackend binds to exactly
+             this service class name to establish the VPN interface. This is not something
+             Gradle merges in automatically from the dependency; it must be declared here
+             with this exact name, or the tunnel will never actually connect even though
+             the app builds and runs fine otherwise. -->
         <service
-            android:name=".vpn.FastVpnService"
-            android:exported="false"
-            android:foregroundServiceType="specialUse"
-            android:permission="android.permission.BIND_VPN_SERVICE">
+            android:name="com.wireguard.android.backend.GoBackend$VpnService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:exported="false">
             <intent-filter>
                 <action android:name="android.net.VpnService" />
             </intent-filter>
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="vpn" />
         </service>
+
+
+        <!-- OpenVPN engine (vpnLib). The library exports its service and activities; nothing outside this app
+             needs them (the system binds the VPN service through BIND_VPN_SERVICE), so close them and
+             declare the foreground-service type Android 14+ requires. -->
+        <service
+            android:name="de.blinkt.openvpn.core.OpenVPNService"
+            android:exported="false"
+            android:foregroundServiceType="systemExempted"
+            tools:node="merge"
+            tools:replace="android:exported" />
+        <activity
+            android:name="de.blinkt.openvpn.VPNHelper"
+            android:exported="false"
+            tools:node="merge"
+            tools:replace="android:exported" />
+        <activity
+            android:name="de.blinkt.openvpn.LaunchVPN"
+            android:exported="false"
+            tools:node="merge"
+            tools:replace="android:exported" />
+        <activity
+            android:name="de.blinkt.openvpn.DisconnectVPNActivity"
+            android:exported="false"
+            tools:node="merge"
+            tools:replace="android:exported" />
+
     </application>
 </manifest>
